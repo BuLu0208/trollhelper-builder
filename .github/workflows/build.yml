@@ -1,6 +1,11 @@
 name: Build TrollHelper OTA IPAs
 
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       upload_release:
