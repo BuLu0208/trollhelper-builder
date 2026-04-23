@@ -38,22 +38,10 @@ jobs:
           import json, sys
           data = json.load(sys.stdin)
           for fw in data.get('firmwares', []):
-              if fw.get('version') == '14.8.1' and fw.get('signed') == True:
+              if fw.get('version') == '14.8.1':
                   print(fw['url'])
                   break
           ")
-          if [ -z "$IPSW_URL" ]; then
-              echo "Trying any iOS 14.8.x..."
-              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone8,4?type=ipsw" | python3 -c "
-              import json, sys
-              data = json.load(sys.stdin)
-              for fw in data.get('firmwares', []):
-                  ver = fw.get('version', '')
-                  if ver.startswith('14.8') and fw.get('signed') == True:
-                      print(fw['url'])
-                      break
-              ")
-          fi
           if [ -z "$IPSW_URL" ]; then
               echo "Trying any iOS 14.x..."
               IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone8,4?type=ipsw" | python3 -c "
@@ -61,7 +49,7 @@ jobs:
               data = json.load(sys.stdin)
               for fw in data.get('firmwares', []):
                   ver = fw.get('version', '')
-                  if ver.startswith('14.') and fw.get('signed') == True:
+                  if ver.startswith('14.'):
                       print(fw['url'])
                       break
               ")
