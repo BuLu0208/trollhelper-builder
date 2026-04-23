@@ -13,15 +13,13 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ldid p7zip-full
+        run: brew install ldid
 
       - name: Download Victim IPA
         run: |
@@ -53,16 +51,13 @@ jobs:
           BINARY_NAME=$(echo "$APP_NAME" | cut -f1 -d'.')
           echo "App: $APP_NAME, Binary: $BINARY_NAME"
 
-          # Copy helper + set cpusubtype + sign + inject
           cp helpers/PersistenceHelper_Embedded_Legacy_arm64 _build/TrollStorePersistenceHelperToInject
           python3 scripts/pwnify.py set-cpusubtype _build/TrollStorePersistenceHelperToInject 1
           ldid -S -K./victim.p12 _build/TrollStorePersistenceHelperToInject
           python3 scripts/pwnify.py pwn "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" _build/TrollStorePersistenceHelperToInject
 
-          # Verify
           python3 scripts/pwnify.py print "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME"
 
-          # Package
           cd _build/tmp15 && zip -r ../../TrollHelper_iOS15.ipa Payload/ && cd ../..
           rm -f _build/TrollStorePersistenceHelperToInject
           rm -rf _build/tmp15
@@ -104,13 +99,8 @@ jobs:
           body: |
             ## TrollHelper OTA IPAs
 
-            | File | Device | iOS | Size |
-            |------|--------|-----|------|
+            | File | Device | iOS | Exploit |
+            |------|--------|-----|---------|
             | TrollHelper_iOS15.ipa | A8-A11 (arm64) | 14.0-15.6.1 | CoreTrust bug |
             | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 | CoreTrust bug |
-
-            ### Features
-            - 卡密验证 (API: kmlogon)
-            - 自定义 TrollStore.tar 下载源
-            - OTA 安装 (itms-services://)
           draft: true
