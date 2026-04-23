@@ -13,9 +13,6 @@ on:
         required: false
         default: 'false'
 
-env:
-  IPA_URL: https://github.com/sudo-self/TrollStore-15.7.3/raw/main/TrollInstaller.ipa
-
 jobs:
   build:
     runs-on: macos-latest
@@ -26,11 +23,121 @@ jobs:
       - name: Install dependencies
         run: brew install ldid openssl@3
 
-      - name: Download Victim IPA
+      - name: Cache InstallerVictim.ipa
+        id: cache-victim
+        uses: actions/cache@v4
+        with:
+          path: Victim/InstallerVictim.ipa
+          key: tvapp-victim-v2
+
+      - name: Extract TV.app from IPSW
+        if: steps.cache-victim.outputs.cache-hit != 'true'
         run: |
-          curl -L -o Victim/InstallerVictim.ipa "${{ env.IPA_URL }}"
-          file Victim/InstallerVictim.ipa
+          echo "=== Finding iOS 14.8.1 IPSW for iPhone SE (smallest IPSW) ==="
+          IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone8,4?type=ipsw" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for fw in data.get('firmwares', []):
+              if fw.get('version') == '14.8.1' and fw.get('signed') == True:
+                  print(fw['url'])
+                  break
+          ")
+          if [ -z "$IPSW_URL" ]; then
+              echo "Trying any iOS 14.8.x..."
+              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone8,4?type=ipsw" | python3 -c "
+              import json, sys
+              data = json.load(sys.stdin)
+              for fw in data.get('firmwares', []):
+                  ver = fw.get('version', '')
+                  if ver.startswith('14.8') and fw.get('signed') == True:
+                      print(fw['url'])
+                      break
+              ")
+          fi
+          if [ -z "$IPSW_URL" ]; then
+              echo "Trying any iOS 14.x..."
+              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone8,4?type=ipsw" | python3 -c "
+              import json, sys
+              data = json.load(sys.stdin)
+              for fw in data.get('firmwares', []):
+                  ver = fw.get('version', '')
+                  if ver.startswith('14.') and fw.get('signed') == True:
+                      print(fw['url'])
+                      break
+              ")
+          fi
+
+          if [ -z "$IPSW_URL" ]; then
+              echo "ERROR: Could not find a suitable IPSW URL"
+              exit 1
+          fi
+
+          echo "Downloading IPSW: $IPSW_URL"
+          curl -L -o ipsw.zip "$IPSW_URL"
+          echo "IPSW size: $(du -h ipsw.zip | cut -f1)"
+
+          echo "=== Extracting IPSW ==="
+          unzip -o ipsw.zip -d ipsw_extracted 2>&1 | tail -3
+
+          echo "=== Finding DMG files ==="
+          # Find all DMGs, sort by size (largest first = root filesystem)
+          DMGS=$(find ipsw_extracted -name "*.dmg" -exec du -b {} \; | sort -rn | head -5)
+          echo "$DMGS"
+
+          echo "=== Searching for TV.app in DMGs ==="
+          TV_APP_PATH=""
+          MOUNT_POINT="/tmp/ipsw_mount"
+
+          while IFS= read -r line; do
+              DMG_PATH=$(echo "$line" | awk '{print $2}')
+              echo "Checking DMG: $DMG_PATH"
+              
+              mkdir -p "$MOUNT_POINT"
+              hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
+              sleep 2
+
+              # Search for TV.app or AppleTV.app
+              FOUND=$(find "$MOUNT_POINT" -maxdepth 3 -name "TV.app" -o -name "AppleTV.app" 2>/dev/null | head -1)
+              
+              if [ -n "$FOUND" ]; then
+                  echo "Found: $FOUND"
+                  TV_APP_PATH="$FOUND"
+                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
+                  break
+              fi
+
+              hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
+          done <<< "$DMGS"
+
+          if [ -z "$TV_APP_PATH" ]; then
+              echo "ERROR: TV.app not found in any DMG"
+              echo "Listing all .app bundles found:"
+              for DMG_PATH in $(find ipsw_extracted -name "*.dmg"); do
+                  mkdir -p "$MOUNT_POINT"
+                  hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
+                  sleep 2
+                  find "$MOUNT_POINT" -maxdepth 3 -name "*.app" -type d 2>/dev/null | head -20
+                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
+              done
+              exit 1
+          fi
+
+          echo "=== Packaging TV.app as IPA ==="
+          mkdir -p ipa_payload/Payload
+          cp -r "$TV_APP_PATH" ipa_payload/Payload/
+          cd ipa_payload && zip -r ../../Victim/InstallerVictim.ipa Payload/ && cd ..
+          
+          echo "Created InstallerVictim.ipa: $(du -h Victim/InstallerVictim.ipa | cut -f1)"
+          
+          # Cleanup large files
+          rm -rf ipsw.zip ipsw_extracted ipa_payload
+
+      - name: Verify Victim IPA
+        run: |
+          echo "=== Victim IPA Info ==="
           python3 scripts/pwnify.py print Victim/InstallerVictim.ipa
+          echo ""
+          file Victim/InstallerVictim.ipa
 
       - name: Generate victim.p12
         run: bash scripts/generate_victim_cert.sh MRLQS75089
@@ -61,6 +168,7 @@ jobs:
           ldid -S -K./victim.p12 _build/TrollStorePersistenceHelperToInject
           python3 scripts/pwnify.py pwn "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" _build/TrollStorePersistenceHelperToInject
 
+          echo "=== Result ==="
           python3 scripts/pwnify.py print "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME"
 
           cd _build/tmp15 && zip -r ../../TrollHelper_iOS15.ipa Payload/ && cd ../..
@@ -78,6 +186,8 @@ jobs:
           BINARY_NAME=$(echo "$APP_NAME" | cut -f1 -d'.')
 
           python3 scripts/pwnify.py pwn64e "_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" helpers/PersistenceHelper_Embedded_Legacy_arm64e
+
+          echo "=== Result ==="
           python3 scripts/pwnify.py print "_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME"
 
           cd _build/tmp64e && zip -r ../../TrollHelper_arm64e.ipa Payload/ && cd ../..
@@ -104,8 +214,11 @@ jobs:
           body: |
             ## TrollHelper OTA IPAs
 
-            | File | Device | iOS | Exploit |
-            |------|--------|-----|---------|
-            | TrollHelper_iOS15.ipa | A8-A11 (arm64) | 14.0-15.6.1 | CoreTrust bug |
-            | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 | CoreTrust bug |
+            | File | Device | iOS |
+            |------|--------|-----|
+            | TrollHelper_iOS15.ipa | A11及以下 (arm64) | 14.0-15.4.1 |
+            | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 |
+
+            ### Usage
+            Host IPA + manifest.plist on HTTPS server, install via itms-services:// link
           draft: true
