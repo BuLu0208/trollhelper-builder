@@ -12,6 +12,10 @@ on:
         description: 'Upload to GitHub Release'
         required: false
         default: 'false'
+      build_victim:
+        description: 'Rebuild and upload InstallerVictim.ipa to Release'
+        required: false
+        default: 'false'
 
 jobs:
   build:
@@ -23,118 +27,121 @@ jobs:
       - name: Install dependencies
         run: brew install ldid openssl@3
 
-      - name: Cache InstallerVictim.ipa
-        id: cache-victim
-        uses: actions/cache@v4
-        with:
-          path: Victim/InstallerVictim.ipa
-          key: tvapp-victim-v7
-
-      - name: Extract TV.app from IPSW
-        if: steps.cache-victim.outputs.cache-hit != 'true'
+      - name: Download or Build InstallerVictim.ipa
+        id: victim
         run: |
-          echo "=== Finding iOS 14.8.1 IPSW for iPhone 8 (has TV.app) ==="
-          # iPhone 8 (iPhone10,1) ships with TV.app built in
-          IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,1?type=ipsw" | python3 -c "
+          mkdir -p Victim
+          # Try to download from latest release
+          DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | python3 -c "
           import json, sys
           data = json.load(sys.stdin)
-          for fw in data.get('firmwares', []):
-              if fw.get('version') == '14.8.1':
-                  print(fw['url'])
+          for a in data.get('assets', []):
+              if a['name'] == 'InstallerVictim.ipa':
+                  print(a['browser_download_url'])
                   break
-          ")
-          if [ -z "$IPSW_URL" ]; then
-              echo "Trying iPhone 7 Plus (iPhone10,2)..."
-              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,2?type=ipsw" | python3 -c "
-              import json, sys
-              data = json.load(sys.stdin)
-              for fw in data.get('firmwares', []):
-                  if fw.get('version') == '14.8.1':
-                      print(fw['url'])
-                      break
-              ")
+          " 2>/dev/null)
+          if [ -n "$DOWNLOAD_URL" ]; then
+              echo "Downloading InstallerVictim.ipa from Release..."
+              curl -L -o Victim/InstallerVictim.ipa "$DOWNLOAD_URL"
+              echo "downloaded=true" >> $GITHUB_OUTPUT
+          else
+              echo "No pre-built InstallerVictim.ipa found, building from scratch..."
+              echo "downloaded=false" >> $GITHUB_OUTPUT
           fi
-          if [ -z "$IPSW_URL" ]; then
-              echo "Trying any iOS 14.x on iPhone 8..."
-              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,1?type=ipsw" | python3 -c "
-              import json, sys
-              data = json.load(sys.stdin)
-              for fw in data.get('firmwares', []):
-                  ver = fw.get('version', '')
-                  if ver.startswith('14.'):
-                      print(fw['url'])
-                      break
-              ")
+
+      - name: Build InstallerVictim.ipa from scratch
+        if: steps.victim.outputs.downloaded != 'true'
+        run: |
+          echo "=== Cross-compiling minimal arm64 binary ==="
+          cat > /tmp/dummy.m << 'EOF'
+          #import <Foundation/Foundation.h>
+          int main(int argc, char *argv[]) {
+              @autoreleasepool { }
+              return 0;
+          }
+          EOF
+          # Build arm64 slice
+          xcrun -sdk iphoneos clang -arch arm64 \
+            -miphoneos-version-min=14.0 \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            /tmp/dummy.m -o /tmp/TV_arm64 \
+            -framework Foundation -lobjc
+          file /tmp/TV_arm64
+
+          # Try to build arm64e slice (for A12+ support)
+          xcrun -sdk iphoneos clang -arch arm64e \
+            -miphoneos-version-min=14.0 \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            /tmp/dummy.m -o /tmp/TV_arm64e \
+            -framework Foundation -lobjc 2>/dev/null || true
+
+          # Create fat binary if arm64e succeeded
+          if [ -f /tmp/TV_arm64e ]; then
+              echo "Creating fat binary (arm64 + arm64e)..."
+              lipo -create /tmp/TV_arm64 /tmp/TV_arm64e -output /tmp/TV
+          else
+              echo "Using arm64 only..."
+              cp /tmp/TV_arm64 /tmp/TV
           fi
-          if [ -z "$IPSW_URL" ]; then
-              echo "ERROR: Could not find a suitable IPSW URL"
-              exit 1
-          fi
-          echo "Downloading IPSW: $IPSW_URL"
-          curl -L -o ipsw.zip "$IPSW_URL"
-          echo "IPSW size: $(du -h ipsw.zip | cut -f1)"
-          echo "=== Extracting IPSW ==="
-          unzip -o ipsw.zip -d ipsw_extracted 2>&1 | tail -3
-          echo "=== Finding DMG files ==="
-          # macOS compatible: use stat -f%z instead of du -b
-          DMGS=$(find ipsw_extracted -name "*.dmg" -exec stat -f%z {} \; -print | paste - - | sort -rn | head -5 | awk '{print $2}')
-          echo "$DMGS"
-          echo "=== Searching for victim app with Mach-O binary ==="
-          TV_APP_PATH=""
-          MOUNT_POINT="/tmp/ipsw_mount"
-          while IFS= read -r DMG_PATH; do
-              echo "Checking DMG: $DMG_PATH"
-              
-              mkdir -p "$MOUNT_POINT"
-              hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-              hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
-              sleep 2
-              # Skip AppPlaceholders — those are stubs without real binaries
-              for app in $(find "$MOUNT_POINT" -maxdepth 5 -name "*.app" -type d -not -path "*/AppPlaceholders/*" 2>/dev/null); do
-                  APP_NAME=$(basename "$app" .app)
-                  BINARY="$app/$APP_NAME"
-                  if [ -f "$BINARY" ] && file "$BINARY" 2>/dev/null | grep -q "Mach-O"; then
-                      echo "Found app: $app"
-                      echo "Binary: $BINARY ($(file "$BINARY" | grep -o 'Mach-O[^,]*'))"
-                      TV_APP_PATH="$app"
-                      break
-                  fi
-              done
-              
-              if [ -n "$TV_APP_PATH" ]; then
-                  mkdir -p ipa_payload/Payload
-                  cp -r "$TV_APP_PATH" ipa_payload/Payload/
-                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-                  break
-              fi
-              hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-          done <<< "$DMGS"
-          if [ -z "$TV_APP_PATH" ]; then
-              echo "ERROR: No app with Mach-O binary found in any DMG"
-              echo "Listing all .app bundles found (excluding AppPlaceholders):"
-              for DMG_PATH in $(find ipsw_extracted -name "*.dmg"); do
-                  mkdir -p "$MOUNT_POINT"
-                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-                  hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
-                  sleep 2
-                  find "$MOUNT_POINT" -maxdepth 4 -name "*.app" -type d -not -path "*/AppPlaceholders/*" 2>/dev/null | head -20
-                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-              done
-              exit 1
-          fi
-          echo "=== Packaging TV.app as IPA ==="
-          # Already copied above before DMG detach
-          echo "Files in ipa_payload/Payload:"
-          ls -la ipa_payload/Payload/
+          file /tmp/TV
+
+          echo "=== Creating TV.app bundle ==="
+          mkdir -p Payload/TV.app
+          cp /tmp/TV Payload/TV.app/TV
+
+          cat > Payload/TV.app/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleIdentifier</key>
+              <string>com.apple.tv</string>
+              <key>CFBundleExecutable</key>
+              <string>TV</string>
+              <key>CFBundleName</key>
+              <string>TV</string>
+              <key>CFBundleDisplayName</key>
+              <string>TV</string>
+              <key>CFBundleVersion</key>
+              <string>1.0</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>MinimumOSVersion</key>
+              <string>14.0</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+              </array>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UILaunchStoryboardName</key>
+              <string>LaunchScreen</string>
+          </dict>
+          </plist>
+          PLIST
+
+          echo "=== Packaging IPA ==="
           mkdir -p Victim
-          cd ipa_payload && zip -r ../Victim/InstallerVictim.ipa Payload/ && cd ..
-          echo "IPA created:"
-          ls -la Victim/
-          
-          echo "Created InstallerVictim.ipa: $(du -h Victim/InstallerVictim.ipa | cut -f1)"
-          
-          # Cleanup large files
-          rm -rf ipsw.zip ipsw_extracted ipa_payload
+          zip -r Victim/InstallerVictim.ipa Payload/
+          echo "Created InstallerVictim.ipa:"
+          ls -la Victim/InstallerVictim.ipa
+          file Victim/InstallerVictim.ipa
+          rm -rf Payload
+
+      - name: Upload InstallerVictim.ipa to Release
+        if: steps.victim.outputs.downloaded != 'true' && (github.event.inputs.build_victim == 'true' || github.event_name == 'push')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: victim-v1
+          files: Victim/InstallerVictim.ipa
+          body: |
+            ## InstallerVictim.ipa
+            Pre-built victim IPA (com.apple.tv) for TrollHelper OTA builds.
+            Generated via cross-compilation on macOS runner.
+          draft: false
+          prerelease: true
 
       - name: Verify Victim IPA
         run: |
