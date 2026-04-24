@@ -100,6 +100,9 @@ jobs:
               if [ -n "$FOUND" ]; then
                   echo "Found: $FOUND"
                   TV_APP_PATH="$FOUND"
+                  # Copy BEFORE detaching the DMG
+                  mkdir -p ipa_payload/Payload
+                  cp -r "$TV_APP_PATH" ipa_payload/Payload/
                   hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
                   break
               fi
@@ -119,8 +122,7 @@ jobs:
               exit 1
           fi
           echo "=== Packaging TV.app as IPA ==="
-          mkdir -p ipa_payload/Payload
-          cp -r "$TV_APP_PATH" ipa_payload/Payload/
+          # Already copied above before DMG detach
           cd ipa_payload && zip -r ../../Victim/InstallerVictim.ipa Payload/ && cd ..
           
           echo "Created InstallerVictim.ipa: $(du -h Victim/InstallerVictim.ipa | cut -f1)"
