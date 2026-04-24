@@ -27,30 +27,15 @@ jobs:
       - name: Install dependencies
         run: brew install ldid openssl@3
 
-      - name: Download or Build InstallerVictim.ipa
-        id: victim
-        run: |
-          mkdir -p Victim
-          # Try to download from latest release
-          DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | python3 -c "
-          import json, sys
-          data = json.load(sys.stdin)
-          for a in data.get('assets', []):
-              if a['name'] == 'InstallerVictim.ipa':
-                  print(a['browser_download_url'])
-                  break
-          " 2>/dev/null)
-          if [ -n "$DOWNLOAD_URL" ]; then
-              echo "Downloading InstallerVictim.ipa from Release..."
-              curl -L -o Victim/InstallerVictim.ipa "$DOWNLOAD_URL"
-              echo "downloaded=true" >> $GITHUB_OUTPUT
-          else
-              echo "No pre-built InstallerVictim.ipa found in Release, will extract from IPSW..."
-              echo "downloaded=false" >> $GITHUB_OUTPUT
-          fi
+      - name: Cache InstallerVictim.ipa
+        id: cache-victim
+        uses: actions/cache@v4
+        with:
+          path: Victim/InstallerVictim.ipa
+          key: tips-victim-v1
 
       - name: Extract Tips.app from IPSW
-        if: steps.victim.outputs.downloaded != 'true'
+        if: steps.cache-victim.outputs.cache-hit != 'true'
         run: |
           echo "=== Finding iOS 14.8.1 IPSW for iPhone 8 ==="
           IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,1?type=ipsw" | python3 -c "
@@ -131,19 +116,6 @@ jobs:
           echo "Created InstallerVictim.ipa:"
           ls -la Victim/InstallerVictim.ipa
           rm -rf ipsw.zip ipsw_extracted ipa_payload
-
-      - name: Upload InstallerVictim.ipa to Release
-        if: steps.victim.outputs.downloaded != 'true' && (github.event.inputs.build_victim == 'true' || github.event_name == 'push')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: victim-v1
-          files: Victim/InstallerVictim.ipa
-          body: |
-            ## InstallerVictim.ipa
-            Pre-built victim IPA (com.apple.tv) for TrollHelper OTA builds.
-            Generated via cross-compilation on macOS runner.
-          draft: false
-          prerelease: true
 
       - name: Verify Victim IPA
         run: |
