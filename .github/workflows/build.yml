@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Victim/InstallerVictim.ipa
-          key: tvapp-victim-v4
+          key: tvapp-victim-v5
 
       - name: Extract TV.app from IPSW
         if: steps.cache-victim.outputs.cache-hit != 'true'
@@ -126,7 +126,7 @@ jobs:
           echo "Files in ipa_payload/Payload:"
           ls -la ipa_payload/Payload/
           mkdir -p Victim
-          cd ipa_payload && zip -r ../../Victim/InstallerVictim.ipa Payload/ && cd ..
+          cd ipa_payload && zip -r ../Victim/InstallerVictim.ipa Payload/ && cd ..
           echo "IPA created:"
           ls -la Victim/
           
