@@ -113,6 +113,29 @@ jobs:
           echo "=== Packaging Tips.app as InstallerVictim.ipa ==="
           mkdir -p Victim
           cd ipa_payload && zip -r ../Victim/InstallerVictim.ipa Payload/ && cd ..
+
+      - name: Fix bundle ID for compatibility
+        run: |
+          mkdir -p _build/fix
+          for ipa in Victim/InstallerVictim.ipa; do
+            [ -f "$ipa" ] || continue
+            mkdir -p _build/fix
+            cd _build/fix
+            unzip -o "../../$ipa"
+            APP_DIR=$(find Payload -maxdepth 1 -mindepth 1 -type d | head -1)
+            PLIST="$APP_DIR/Info.plist"
+            echo "=== Fixing bundle ID in $(basename $APP_DIR) ==="
+            # 改 bundle ID 避免跟系统 App 冲突
+            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.opa334.TrollStoreHelper" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName TrollStoreHelper" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleName TrollStoreHelper" "$PLIST"
+            echo "New bundle ID: $(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST")"
+            rm -f "../../$ipa"
+            zip -r "../../$ipa" Payload/
+            cd ../..
+            rm -rf _build/fix
+          done
+          echo "=== Bundle ID fixed ==="
           echo "Created InstallerVictim.ipa:"
           ls -la Victim/InstallerVictim.ipa
           rm -rf ipsw.zip ipsw_extracted ipa_payload
@@ -189,16 +212,10 @@ jobs:
             TrollHelper_arm64e.ipa
           body: |
             ## TrollHelper OTA IPAs
-            | File | Device | iOS | 大小 |
-            |------|--------|-----|------|
-            | TrollHelper_iOS15.ipa | A11及以下 (arm64) | 14.0-15.4.1 | ~420KB |
-            | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 | ~450KB |
-            ### 在线安装
-            下载 IPA + manifest.plist 部署到 HTTPS 服务器，手机 Safari 访问 itms-services:// 链接即可安装。
-            ### 国内加速下载
-            直接下载链接（GitHub Proxy 加速）：
-            - https://ghfast.top/https://github.com/BuLu0208/trollhelper-builder/releases/download/trollhelper-ota-v1.0/TrollHelper_iOS15.ipa
-            - https://ghfast.top/https://github.com/BuLu0208/trollhelper-builder/releases/download/trollhelper-ota-v1.0/TrollHelper_arm64e.ipa
+            | File | Device | iOS |
+            |------|--------|-----|
+            | TrollHelper_iOS15.ipa | A11及以下 (arm64) | 14.0-15.4.1 |
+            | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 |
           draft: false
           prerelease: true
           overwrite_files: true
