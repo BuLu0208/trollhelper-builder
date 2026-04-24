@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Victim/InstallerVictim.ipa
-          key: tvapp-victim-v6
+          key: tvapp-victim-v7
 
       - name: Extract TV.app from IPSW
         if: steps.cache-victim.outputs.cache-hit != 'true'
@@ -86,27 +86,22 @@ jobs:
               echo "Checking DMG: $DMG_PATH"
               
               mkdir -p "$MOUNT_POINT"
-              # Detach first in case of stale mount
               hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
               hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
               sleep 2
               # Skip AppPlaceholders — those are stubs without real binaries
-              FOUND=$(find "$MOUNT_POINT" -maxdepth 4 -name "*.app" -type d -not -path "*/AppPlaceholders/*" 2>/dev/null | while read -r app; do
-                  # Check if app contains a Mach-O binary
-                  BINARY=$(find "$app" -maxdepth 2 -type f -name "Info.plist" -exec sh -c 'PLIST="$1"; DIR=$(dirname "$PLIST"); APPNAME=$(basename "$DIR"); echo "$DIR/$APPNAME"' _ {} \;)
+              for app in $(find "$MOUNT_POINT" -maxdepth 5 -name "*.app" -type d -not -path "*/AppPlaceholders/*" 2>/dev/null); do
+                  APP_NAME=$(basename "$app" .app)
+                  BINARY="$app/$APP_NAME"
                   if [ -f "$BINARY" ] && file "$BINARY" 2>/dev/null | grep -q "Mach-O"; then
-                      echo "$BINARY"
+                      echo "Found app: $app"
+                      echo "Binary: $BINARY ($(file "$BINARY" | grep -o 'Mach-O[^,]*'))"
+                      TV_APP_PATH="$app"
                       break
                   fi
-              done | head -1)
+              done
               
-              if [ -n "$FOUND" ]; then
-                  # FOUND is the path to the binary, get the .app directory
-                  APP_DIR=$(dirname "$(dirname "$FOUND")")
-                  echo "Found app with Mach-O: $APP_DIR"
-                  echo "Binary: $(basename "$FOUND")"
-                  TV_APP_PATH="$APP_DIR"
-                  # Copy BEFORE detaching the DMG
+              if [ -n "$TV_APP_PATH" ]; then
                   mkdir -p ipa_payload/Payload
                   cp -r "$TV_APP_PATH" ipa_payload/Payload/
                   hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
