@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Victim/InstallerVictim.ipa
-          key: tvapp-victim-v3
+          key: tvapp-victim-v4
 
       - name: Extract TV.app from IPSW
         if: steps.cache-victim.outputs.cache-hit != 'true'
@@ -123,8 +123,12 @@ jobs:
           fi
           echo "=== Packaging TV.app as IPA ==="
           # Already copied above before DMG detach
+          echo "Files in ipa_payload/Payload:"
+          ls -la ipa_payload/Payload/
           mkdir -p Victim
           cd ipa_payload && zip -r ../../Victim/InstallerVictim.ipa Payload/ && cd ..
+          echo "IPA created:"
+          ls -la Victim/
           
           echo "Created InstallerVictim.ipa: $(du -h Victim/InstallerVictim.ipa | cut -f1)"
           
