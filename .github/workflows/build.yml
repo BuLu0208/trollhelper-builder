@@ -28,13 +28,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Victim/InstallerVictim.ipa
-          key: tvapp-victim-v2
+          key: tvapp-victim-v3
 
       - name: Extract TV.app from IPSW
         if: steps.cache-victim.outputs.cache-hit != 'true'
         run: |
-          echo "=== Finding iOS 14.8.1 IPSW for iPhone SE (smallest IPSW) ==="
-          IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone8,4?type=ipsw" | python3 -c "
+          echo "=== Finding iOS 14.8.1 IPSW for iPhone 8 (has TV.app) ==="
+          # iPhone 8 (iPhone10,1) ships with TV.app built in
+          IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,1?type=ipsw" | python3 -c "
           import json, sys
           data = json.load(sys.stdin)
           for fw in data.get('firmwares', []):
@@ -43,8 +44,19 @@ jobs:
                   break
           ")
           if [ -z "$IPSW_URL" ]; then
-              echo "Trying any iOS 14.x..."
-              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone8,4?type=ipsw" | python3 -c "
+              echo "Trying iPhone 7 Plus (iPhone10,2)..."
+              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,2?type=ipsw" | python3 -c "
+              import json, sys
+              data = json.load(sys.stdin)
+              for fw in data.get('firmwares', []):
+                  if fw.get('version') == '14.8.1':
+                      print(fw['url'])
+                      break
+              ")
+          fi
+          if [ -z "$IPSW_URL" ]; then
+              echo "Trying any iOS 14.x on iPhone 8..."
+              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,1?type=ipsw" | python3 -c "
               import json, sys
               data = json.load(sys.stdin)
               for fw in data.get('firmwares', []):
@@ -54,38 +66,36 @@ jobs:
                       break
               ")
           fi
-
           if [ -z "$IPSW_URL" ]; then
               echo "ERROR: Could not find a suitable IPSW URL"
               exit 1
           fi
-
           echo "Downloading IPSW: $IPSW_URL"
           curl -L -o ipsw.zip "$IPSW_URL"
           echo "IPSW size: $(du -h ipsw.zip | cut -f1)"
-
           echo "=== Extracting IPSW ==="
           unzip -o ipsw.zip -d ipsw_extracted 2>&1 | tail -3
-
           echo "=== Finding DMG files ==="
-          # Find all DMGs, sort by size (largest first = root filesystem)
-          DMGS=$(find ipsw_extracted -name "*.dmg" -exec du -b {} \; | sort -rn | head -5)
+          # macOS compatible: use stat -f%z instead of du -b
+          DMGS=$(find ipsw_extracted -name "*.dmg" -exec stat -f%z {} \; -print | paste - - | sort -rn | head -5 | awk '{print $2}')
           echo "$DMGS"
-
           echo "=== Searching for TV.app in DMGs ==="
           TV_APP_PATH=""
           MOUNT_POINT="/tmp/ipsw_mount"
-
-          while IFS= read -r line; do
-              DMG_PATH=$(echo "$line" | awk '{print $2}')
+          while IFS= read -r DMG_PATH; do
               echo "Checking DMG: $DMG_PATH"
               
               mkdir -p "$MOUNT_POINT"
+              # Detach first in case of stale mount
+              hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
               hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
               sleep 2
-
               # Search for TV.app or AppleTV.app
-              FOUND=$(find "$MOUNT_POINT" -maxdepth 3 -name "TV.app" -o -name "AppleTV.app" 2>/dev/null | head -1)
+              FOUND=$(find "$MOUNT_POINT" -maxdepth 4 -name "TV.app" -type d 2>/dev/null | head -1)
+              
+              if [ -z "$FOUND" ]; then
+                  FOUND=$(find "$MOUNT_POINT" -maxdepth 4 -name "AppleTV.app" -type d 2>/dev/null | head -1)
+              fi
               
               if [ -n "$FOUND" ]; then
                   echo "Found: $FOUND"
@@ -93,23 +103,21 @@ jobs:
                   hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
                   break
               fi
-
               hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
           done <<< "$DMGS"
-
           if [ -z "$TV_APP_PATH" ]; then
               echo "ERROR: TV.app not found in any DMG"
               echo "Listing all .app bundles found:"
               for DMG_PATH in $(find ipsw_extracted -name "*.dmg"); do
                   mkdir -p "$MOUNT_POINT"
+                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
                   hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
                   sleep 2
-                  find "$MOUNT_POINT" -maxdepth 3 -name "*.app" -type d 2>/dev/null | head -20
+                  find "$MOUNT_POINT" -maxdepth 4 -name "*.app" -type d 2>/dev/null | head -20
                   hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
               done
               exit 1
           fi
-
           echo "=== Packaging TV.app as IPA ==="
           mkdir -p ipa_payload/Payload
           cp -r "$TV_APP_PATH" ipa_payload/Payload/
@@ -145,20 +153,16 @@ jobs:
         run: |
           mkdir -p _build/tmp15
           unzip -o Victim/InstallerVictim.ipa -d _build/tmp15
-
           APP_PATH=$(find _build/tmp15/Payload -maxdepth 1 -mindepth 1 -type d | head -1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f1 -d'.')
           echo "App: $APP_NAME, Binary: $BINARY_NAME"
-
           cp helpers/PersistenceHelper_Embedded_Legacy_arm64 _build/TrollStorePersistenceHelperToInject
           python3 scripts/pwnify.py set-cpusubtype _build/TrollStorePersistenceHelperToInject 1
           ldid -S -K./victim.p12 _build/TrollStorePersistenceHelperToInject
           python3 scripts/pwnify.py pwn "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" _build/TrollStorePersistenceHelperToInject
-
           echo "=== Result ==="
           python3 scripts/pwnify.py print "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME"
-
           cd _build/tmp15 && zip -r ../../TrollHelper_iOS15.ipa Payload/ && cd ../..
           rm -f _build/TrollStorePersistenceHelperToInject
           rm -rf _build/tmp15
@@ -168,16 +172,12 @@ jobs:
         run: |
           mkdir -p _build/tmp64e
           unzip -o Victim/InstallerVictim.ipa -d _build/tmp64e
-
           APP_PATH=$(find _build/tmp64e/Payload -maxdepth 1 -mindepth 1 -type d | head -1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f1 -d'.')
-
           python3 scripts/pwnify.py pwn64e "_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" helpers/PersistenceHelper_Embedded_Legacy_arm64e
-
           echo "=== Result ==="
           python3 scripts/pwnify.py print "_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME"
-
           cd _build/tmp64e && zip -r ../../TrollHelper_arm64e.ipa Payload/ && cd ../..
           rm -rf _build/tmp64e
           echo "Built TrollHelper_arm64e.ipa ($(du -h TrollHelper_arm64e.ipa | cut -f1))"
@@ -201,12 +201,10 @@ jobs:
             TrollHelper_arm64e.ipa
           body: |
             ## TrollHelper OTA IPAs
-
             | File | Device | iOS |
             |------|--------|-----|
             | TrollHelper_iOS15.ipa | A11及以下 (arm64) | 14.0-15.4.1 |
             | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 |
-
             ### Usage
             Host IPA + manifest.plist on HTTPS server, install via itms-services:// link
           draft: true
