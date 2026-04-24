@@ -123,6 +123,7 @@ jobs:
           fi
           echo "=== Packaging TV.app as IPA ==="
           # Already copied above before DMG detach
+          mkdir -p Victim
           cd ipa_payload && zip -r ../../Victim/InstallerVictim.ipa Payload/ && cd ..
           
           echo "Created InstallerVictim.ipa: $(du -h Victim/InstallerVictim.ipa | cut -f1)"
