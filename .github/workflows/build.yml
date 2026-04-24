@@ -181,7 +181,6 @@ jobs:
           retention-days: 30
 
       - name: Upload to Release
-        if: github.event.inputs.upload_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: trollhelper-ota-v1.0
@@ -190,10 +189,16 @@ jobs:
             TrollHelper_arm64e.ipa
           body: |
             ## TrollHelper OTA IPAs
-            | File | Device | iOS |
-            |------|--------|-----|
-            | TrollHelper_iOS15.ipa | A11及以下 (arm64) | 14.0-15.4.1 |
-            | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 |
-            ### Usage
-            Host IPA + manifest.plist on HTTPS server, install via itms-services:// link
-          draft: true
+            | File | Device | iOS | 大小 |
+            |------|--------|-----|------|
+            | TrollHelper_iOS15.ipa | A11及以下 (arm64) | 14.0-15.4.1 | ~420KB |
+            | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 | ~450KB |
+            ### 在线安装
+            下载 IPA + manifest.plist 部署到 HTTPS 服务器，手机 Safari 访问 itms-services:// 链接即可安装。
+            ### 国内加速下载
+            直接下载链接（GitHub Proxy 加速）：
+            - https://ghfast.top/https://github.com/BuLu0208/trollhelper-builder/releases/download/trollhelper-ota-v1.0/TrollHelper_iOS15.ipa
+            - https://ghfast.top/https://github.com/BuLu0208/trollhelper-builder/releases/download/trollhelper-ota-v1.0/TrollHelper_arm64e.ipa
+          draft: false
+          prerelease: true
+          overwrite_files: true
