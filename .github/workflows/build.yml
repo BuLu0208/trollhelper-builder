@@ -27,8 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install openssl
-          pip3 install ipatool
+          brew install openssl ipatool
 
       - name: Download Victim IPA from App Store
         env:
