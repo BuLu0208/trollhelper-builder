@@ -53,9 +53,8 @@ jobs:
           git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
           cd TSBUILD/Victim
           chmod +x make_cert.sh
-          # macOS LibreSSL 不支持 copy_extensions，用 brew 的 openssl
-          OPENSSL=$(brew --prefix openssl)/bin/openssl
-          sed -i '' "s|openssl |$OPENSSL |g" make_cert.sh
+          # macOS LibreSSL 不支持 copy_extensions，把 brew openssl 放到 PATH 最前面
+          export PATH="$(brew --prefix openssl)/bin:$PATH"
           ./make_cert.sh "$TEAM_ID"
           echo "证书生成完成"
           ls -lh victim.p12
