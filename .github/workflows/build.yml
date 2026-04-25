@@ -2,21 +2,6 @@ name: Build TrollHelperOTA
 
 on:
   workflow_dispatch:
-    inputs:
-      apple_id:
-        description: 'Apple ID Email'
-        required: true
-      apple_password:
-        description: 'Apple ID App-specific Password'
-        required: true
-      app_id:
-        description: 'App Store App ID (e.g. 380248105)'
-        required: true
-        default: '380248105'
-      bundle_id:
-        description: 'Victim App Bundle ID'
-        required: true
-        default: 'com.7thg.flashlight'
 
 jobs:
   build:
@@ -25,98 +10,78 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Download Victim IPA
         run: |
-          brew install openssl ipatool
+          mkdir -p VictimIPA
+          curl -sL -o VictimIPA/victim.ipa "https://github.com/BuLu0208/trollhelper-builder/releases/download/victim-ipa/com.7thg.flashlight_v3.29.ipa"
+          ls -lh VictimIPA/victim.ipa
 
-      - name: Download Victim IPA from App Store
-        env:
-          APPLE_ID: ${{ inputs.apple_id }}
-          APPLE_PASSWORD: ${{ inputs.apple_password }}
+      - name: Extract Team ID from Victim IPA
         run: |
-          # 登录 App Store
-          ipatool auth login --email "$APPLE_ID" --password "$APPLE_PASSWORD"
+          mkdir -p ipa_check
+          unzip -q VictimIPA/victim.ipa -d ipa_check
+          cd ipa_check/Payload
 
-          # 下载 Victim App IPA
-          ipatool download -b "${{ inputs.bundle_id }}" -o VictimIPA.ipa
-
-          echo "下载完成"
-          ls -lh VictimIPA.ipa
-
-      - name: Extract Team ID from IPA
-        run: |
-          # 解压 IPA
-          mkdir -p ipa_extract
-          unzip -q VictimIPA.ipa -d ipa_extract
-
-          # 从 Info.plist 或 embedded.provisionprofile 提取 Team ID
-          cd ipa_extract/Payload
-
-          # 尝试从 code signing 中提取 Team ID
           APP_DIR=$(find . -maxdepth 1 -type d -mindepth 1 | head -1)
-          BINARY="$APP_DIR/$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist" 2>/dev/null || echo "$APP_DIR")"
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
+          BINARY_PATH="$APP_DIR/$BINARY_NAME"
 
-          # 使用 codesign 提取 Team ID
-          TEAM_ID=$(codesign -dvv "$BINARY" 2>&1 | grep "TeamIdentifier" | awk '{print $NF}')
+          echo "=== Victim App Info ==="
+          echo "Bundle ID: $(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Info.plist")"
+          echo "Version: $(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist")"
+          echo "Min OS: $(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP_DIR/Info.plist" 2>/dev/null || echo 'N/A')"
+          echo "Binary: $BINARY_NAME"
+          echo "========================"
+
+          # 提取 Team ID
+          TEAM_ID=$(codesign -dvv "$BINARY_PATH" 2>&1 | grep "TeamIdentifier" | awk '{print $NF}')
           echo "Team ID: $TEAM_ID"
           echo "TEAM_ID=$TEAM_ID" >> $GITHUB_ENV
 
-          # 显示 IPA 信息
-          echo "=== Victim App Info ==="
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP_DIR/Info.plist" 2>/dev/null || echo "No MinimumOSVersion in Info.plist"
-          echo "=================="
+          if [ -z "$TEAM_ID" ]; then
+            echo "ERROR: Could not extract Team ID"
+            exit 1
+          fi
 
       - name: Generate victim certificate
         run: |
-          cd Victim
+          # 使用 TrollStore 2.1.1 的 Victim/make_cert.sh
+          git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
+          cd TSBUILD/Victim
           chmod +x make_cert.sh
           ./make_cert.sh "$TEAM_ID"
           echo "证书生成完成"
           ls -lh victim.p12
 
-      - name: Setup TrollStore build environment
-        run: |
-          # 克隆 TrollStore 源码（指定版本）
-          git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
-
-          # 编译 Pwnify
-          cd TSBUILD/Pwnify
-          make
-
-          echo "构建环境准备完成"
-          ls -lh ../pwnify/pwnify
-
       - name: Build TrollHelperOTA IPA
         run: |
-          # 解压 Victim IPA 供注入
+          cd TSBUILD
+
+          # 编译 Pwnify
+          cd Pwnify && make && cd ..
+
+          # 编译 PersistenceHelper (Legacy arm64, 兼容 iOS 14)
+          make PersistenceHelper_Embedded_Legacy_arm64
+
+          # 解压 Victim IPA
           mkdir -p build_dir
-          unzip -q VictimIPA.ipa -d build_dir
+          unzip -q ../../VictimIPA/victim.ipa -d build_dir
 
           APP_DIR=$(find build_dir/Payload -maxdepth 1 -type d -mindepth 1 | head -1)
-          APP_BINARY=$(basename "$APP_DIR")
           BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
           BINARY_PATH="$APP_DIR/$BINARY_NAME"
 
-          echo "=== 构建 TrollHelperOTA ==="
-          echo "App: $APP_BINARY"
-          echo "Binary: $BINARY_NAME"
+          echo "=== 注入 PersistenceHelper ==="
+          echo "Victim Binary: $BINARY_PATH"
           echo "Team ID: $TEAM_ID"
 
-          # 编译 PersistenceHelper
-          cd TSBUILD
-          make PersistenceHelper_Embedded_Legacy_arm64
-
-          # 注入 PersistenceHelper 到 Victim 二进制
+          # 注入
           ./pwnify/pwnify pwn "$BINARY_PATH" ./PersistenceHelper_Embedded_Legacy_arm64 arm64
 
-          # 签名注入后的二进制
+          # 签名
           ldid -s -K./Victim/victim.p12 "$BINARY_PATH"
 
-          cd ..
-
-          # 重新打包 IPA
+          # 重新打包
           cd build_dir
           zip -r ../TrollHelperOTA_iphoneos-arm64.ipa Payload
           cd ..
