@@ -14,6 +14,7 @@ jobs:
         run: |
           REPO="opa334/TrollStore"
           OUTPUT_DIR="TrollStore-AllVersions"
+          mkdir -p "$OUTPUT_DIR"
 
           # 获取所有 tags（按版本倒序）
           echo "获取所有版本标签..."
