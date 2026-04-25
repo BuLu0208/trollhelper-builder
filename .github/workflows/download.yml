@@ -10,13 +10,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download all versions source code only
+      - name: Download all versions
         run: |
           REPO="opa334/TrollStore"
           OUTPUT_DIR="TrollStore-AllVersions"
           mkdir -p "$OUTPUT_DIR"
 
-          # 获取所有 tags（按版本倒序）
           echo "获取所有版本标签..."
           TAGS=$(git ls-remote --tags --sort=-v:refname "https://github.com/${REPO}.git" \
             | grep -v '\^{}' \
@@ -31,83 +30,42 @@ jobs:
           SUCCESS=0
           FAIL=0
 
-          # 只保留源代码的文件扩展名白名单
-          KEEP_EXT="h m mm swift c cpp cxx hpp hxx S asm makefile mk cmake json plist md txt yaml yml sh py rb js ts xml xib storyboard pbxproj xcworkspacedata entitlements pch modulemap pkg"
-
-          keep_pattern=""
-          for ext in $KEEP_EXT; do
-            keep_pattern="${keep_pattern} -o -iname '*.${ext}'"
-          done
-          # 也保留没有扩展名的 Makefile 文件
-          keep_pattern="\( -iname 'Makefile' -o -iname 'CMakeLists.txt' -o -iname 'Package.swift' ${keep_pattern} \)"
-
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
 
-            SAFE_TAG=$(echo "$tag" | sed 's/[\/\\:*?"<>|]/_/g')
-            echo -n "  下载 $SAFE_TAG ... "
+            echo -n "  下载 ${tag}.zip ... "
 
-            ZIP_URL="https://github.com/${REPO}/archive/refs/tags/${tag}.zip"
-            LOCAL_ZIP="/tmp/${SAFE_TAG}.zip"
-            EXTRACT_DIR="/tmp/extract_${SAFE_TAG}"
-
-            if curl -sL --connect-timeout 30 --max-time 120 -o "$LOCAL_ZIP" "$ZIP_URL"; then
-              mkdir -p "$EXTRACT_DIR"
-              unzip -q "$LOCAL_ZIP" -d "$EXTRACT_DIR" 2>/dev/null
-
-              EXTRACTED=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)
-              if [ -n "$EXTRACTED" ]; then
-                DEST="${OUTPUT_DIR}/${SAFE_TAG}"
-                mkdir -p "$DEST"
-
-                # 用 find 白名单只复制源代码文件，保留目录结构
-                cd "$EXTRACTED"
-                find . -type f $keep_pattern | while IFS= read -r f; do
-                  # 去掉开头的 ./
-                  rel="${f#./}"
-                  dir=$(dirname "$rel")
-                  mkdir -p "${DEST}/${dir}"
-                  cp "$f" "${DEST}/${rel}"
-                done
-                cd - > /dev/null
-
-                FILE_COUNT=$(find "$DEST" -type f | wc -l)
-                DIR_SIZE=$(du -sh "$DEST" | cut -f1)
-                echo "✓ (${FILE_COUNT} 文件, ${DIR_SIZE})"
-                SUCCESS=$((SUCCESS + 1))
-              else
-                echo "✗ 解压失败"
-                FAIL=$((FAIL + 1))
-              fi
-              rm -rf "$EXTRACT_DIR"
+            if curl -sL --connect-timeout 30 --max-time 120 \
+              -o "${OUTPUT_DIR}/${tag}.zip" \
+              "https://github.com/${REPO}/archive/refs/tags/${tag}.zip"; then
+              SIZE=$(ls -lh "${OUTPUT_DIR}/${tag}.zip" | awk '{print $5}')
+              echo "✓ ($SIZE)"
+              SUCCESS=$((SUCCESS + 1))
             else
-              echo "✗ 下载失败"
+              echo "✗"
               FAIL=$((FAIL + 1))
             fi
-
-            rm -f "$LOCAL_ZIP"
           done <<< "$TAGS"
 
           echo ""
           echo "下载完成: 成功 $SUCCESS, 失败 $FAIL"
 
-      - name: Package as zip
+      - name: Package and summarize
         run: |
-          zip -r TrollStore-SourceCode.zip TrollStore-AllVersions/
+          zip -r TrollStore-AllVersions.zip TrollStore-AllVersions/
+
           echo "## 打包结果" >> $GITHUB_STEP_SUMMARY
-          echo "| 项目 | 大小 |" >> $GITHUB_STEP_SUMMARY
+          TOTAL_SIZE=$(ls -lh TrollStore-AllVersions.zip | awk '{print $5}')
+          echo "**总大小**: $TOTAL_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "**版本数**: $(ls TrollStore-AllVersions/*.zip | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 版本 | 大小 |" >> $GITHUB_STEP_SUMMARY
           echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          ZIP_SIZE=$(ls -lh TrollStore-SourceCode.zip | awk '{print $5}')
-          echo "| 总压缩包 | $ZIP_SIZE |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 各版本大小" >> $GITHUB_STEP_SUMMARY
-          du -sh TrollStore-AllVersions/*/ >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "共 $(ls TrollStore-AllVersions/ | wc -l) 个版本" >> $GITHUB_STEP_SUMMARY
+          ls -lh TrollStore-AllVersions/*.zip | awk '{print "| " $NF " | " $5 " |"}' | sed 's|TrollStore-AllVersions/||' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollStore-SourceCode
-          path: TrollStore-SourceCode.zip
+          name: TrollStore-AllVersions
+          path: TrollStore-AllVersions.zip
           retention-days: 7
