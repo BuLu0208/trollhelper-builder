@@ -32,14 +32,13 @@ jobs:
           echo "Version: $(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist")"
           echo "Binary: $BINARY_NAME"
 
-          # 提取 Team ID
           TEAM_ID=$(codesign -dvv "$APP_DIR/$BINARY_NAME" 2>&1 | grep "TeamIdentifier" | awk '{print $NF}')
           echo "Team ID: $TEAM_ID"
           echo "TEAM_ID=$TEAM_ID" >> $GITHUB_OUTPUT
 
       - name: Setup build environment
         run: |
-          brew install openssl ldid
+          brew install openssl ldid xz
 
       - name: Install Theos
         run: |
@@ -47,18 +46,15 @@ jobs:
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "PATH=$THEOS/bin:$PATH" >> $GITHUB_ENV
-          # Theos 依赖
-          brew install xz
 
       - name: Clone TrollStore 2.1.1
         run: |
           git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
 
-      - name: Generate victim certificate (make_cert.sh)
+      - name: Generate victim certificate
         run: |
           cd TSBUILD/Victim
           chmod +x make_cert.sh
-          # macOS LibreSSL 不支持 copy_extensions/addext，用 brew openssl
           export PATH="$(brew --prefix openssl)/bin:$PATH"
           ./make_cert.sh "${{ steps.teamid.outputs.TEAM_ID }}"
           echo "证书生成完成"
@@ -69,97 +65,95 @@ jobs:
           cd TSBUILD/Pwnify
           make
           echo "Pwnify 编译完成"
-          ls -lh pwnify/pwnify
+          ls -lh pwnify
 
-      - name: Build PersistenceHelper (iOS 15 arm64)
+      - name: Build PersistenceHelper (Legacy arm64)
         run: |
           cd TSBUILD
-          # 按照 Makefile 中 make_trollhelper_embedded 的流程
-          # 编译 PersistenceHelper_Embedded_Legacy_arm64
+          mkdir -p _build
           cd TrollHelper
           make clean
           make FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 LEGACY_CT_BUG=1
           cp .theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper ../_build/PersistenceHelper_Embedded_Legacy_arm64
-          echo "PersistenceHelper 编译完成"
+          echo "PersistenceHelper Legacy arm64 编译完成"
           ls -lh ../_build/PersistenceHelper_Embedded_Legacy_arm64
 
-      - name: Build TrollHelperOTA iOS15 (arm64) — 完全按照作者 Makefile 流程
+      - name: Build TrollHelperOTA iOS15 (arm64)
         run: |
           cd TSBUILD
 
-          echo "=== 按照 build_installer15 流程 ==="
+          echo "=== build_installer15 ==="
           mkdir -p ./_build/tmp15
 
-          # Step 1: 解压 Victim IPA
+          # 作者原始流程：
+          # 1. unzip Victim IPA
           unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp15
 
-          # Step 2: 复制 PersistenceHelper
+          # 2. cp PersistenceHelper
           cp ./_build/PersistenceHelper_Embedded_Legacy_arm64 ./_build/TrollStorePersistenceHelperToInject
 
-          # Step 3: pwnify set-cpusubtype 1
-          echo "设置 cpusubtype..."
-          ./pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
+          # 3. pwnify set-cpusubtype 1
+          ./Pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
 
-          # Step 4: ldid 签名 PersistenceHelper
-          echo "签名 PersistenceHelper..."
+          # 4. ldid 签名 PersistenceHelper
           ldid -s -K./Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
 
-          # Step 5: 找到 Victim App 的二进制路径并注入
+          # 5. 找到 victim binary 并 pwnify pwn 注入
           APP_PATH=$(find ./_build/tmp15/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
-          echo "Victim App: $APP_NAME, Binary: $BINARY_NAME"
+          echo "Inject into: $APP_NAME/$BINARY_NAME"
 
-          pwnify/pwnify pwn "./_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" ./_build/TrollStorePersistenceHelperToInject
+          ./Pwnify/pwnify pwn "./_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" ./_build/TrollStorePersistenceHelperToInject
 
-          # Step 6: 打包 IPA
+          # 6. zip 打包
           pushd ./_build/tmp15
           zip -vrD ../../TrollHelper_iOS15.ipa *
           popd
 
-          # 清理
           rm ./_build/TrollStorePersistenceHelperToInject
           rm -rf ./_build/tmp15
 
-          echo ""
-          echo "=== TrollHelper_iOS15.ipa 构建完成 ==="
+          echo "=== TrollHelper_iOS15.ipa 完成 ==="
           ls -lh TrollHelper_iOS15.ipa
 
-      - name: Build TrollHelperOTA arm64e — 完全按照作者 Makefile 流程
+      - name: Build PersistenceHelper (Legacy arm64e)
         run: |
           cd TSBUILD
-
-          echo "=== 按照 build_installer64e 流程 ==="
-
-          # Step 1: 编译 arm64e 版 PersistenceHelper
           cd TrollHelper
           make clean
           make FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 CUSTOM_ARCHS=arm64e
           cp .theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper ../_build/PersistenceHelper_Embedded_Legacy_arm64e
-          cd ..
+          echo "PersistenceHelper Legacy arm64e 编译完成"
+          ls -lh ../_build/PersistenceHelper_Embedded_Legacy_arm64e
 
+      - name: Build TrollHelperOTA arm64e
+        run: |
+          cd TSBUILD
+
+          echo "=== build_installer64e ==="
           mkdir -p ./_build/tmp64e
 
-          # Step 2: 解压 Victim IPA
+          # 作者原始流程：
+          # 1. unzip Victim IPA
           unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp64e
 
-          # Step 3: 找到 Victim App 二进制并注入 (不签名)
+          # 2. 找到 victim binary 并 pwnify pwn64e 注入 (不签名)
           APP_PATH=$(find ./_build/tmp64e/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
-          echo "Victim App: $APP_NAME, Binary: $BINARY_NAME"
+          echo "Inject into: $APP_NAME/$BINARY_NAME"
 
-          pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" ./_build/PersistenceHelper_Embedded_Legacy_arm64e
+          ./Pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" ./_build/PersistenceHelper_Embedded_Legacy_arm64e
 
-          # Step 4: 打包 IPA
+          # 3. zip 打包
           pushd ./_build/tmp64e
           zip -vrD ../../TrollHelper_arm64e.ipa *
           popd
 
           rm -rf ./_build/tmp64e
 
-          echo ""
-          echo "=== TrollHelper_arm64e.ipa 构建完成 ==="
+          echo "=== TrollHelper_arm64e.ipa 完成 ==="
           ls -lh TrollHelper_arm64e.ipa
 
       - name: Upload IPAs
