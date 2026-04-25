@@ -1,221 +1,134 @@
-name: Build TrollHelper OTA IPAs
+name: Build TrollHelperOTA
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
   workflow_dispatch:
     inputs:
-      upload_release:
-        description: 'Upload to GitHub Release'
-        required: false
-        default: 'false'
-      build_victim:
-        description: 'Rebuild and upload InstallerVictim.ipa to Release'
-        required: false
-        default: 'false'
+      apple_id:
+        description: 'Apple ID Email'
+        required: true
+      apple_password:
+        description: 'Apple ID App-specific Password'
+        required: true
+      app_id:
+        description: 'App Store App ID (e.g. 380248105)'
+        required: true
+        default: '380248105'
+      bundle_id:
+        description: 'Victim App Bundle ID'
+        required: true
+        default: 'com.7thg.flashlight'
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install ldid openssl@3
-
-      - name: Cache InstallerVictim.ipa
-        id: cache-victim
-        uses: actions/cache@v4
-        with:
-          path: Victim/InstallerVictim.ipa
-          key: tips-victim-v1
-
-      - name: Extract Tips.app from IPSW
-        if: steps.cache-victim.outputs.cache-hit != 'true'
         run: |
-          echo "=== Finding iOS 14.8.1 IPSW for iPhone 8 ==="
-          IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,1?type=ipsw" | python3 -c "
-          import json, sys
-          data = json.load(sys.stdin)
-          for fw in data.get('firmwares', []):
-              if fw.get('version') == '14.8.1':
-                  print(fw['url'])
-                  break
-          ")
-          if [ -z "$IPSW_URL" ]; then
-              echo "Trying any iOS 14.x..."
-              IPSW_URL=$(curl -sL "https://api.ipsw.me/v4/device/iPhone10,1?type=ipsw" | python3 -c "
-              import json, sys
-              data = json.load(sys.stdin)
-              for fw in data.get('firmwares', []):
-                  ver = fw.get('version', '')
-                  if ver.startswith('14.'):
-                      print(fw['url'])
-                      break
-              ")
-          fi
-          if [ -z "$IPSW_URL" ]; then
-              echo "ERROR: Could not find a suitable IPSW URL"
-              exit 1
-          fi
-          echo "Downloading IPSW: $IPSW_URL"
-          curl -L -o ipsw.zip "$IPSW_URL"
-          echo "IPSW size: $(du -h ipsw.zip | cut -f1)"
-          echo "=== Extracting IPSW ==="
-          unzip -o ipsw.zip -d ipsw_extracted 2>&1 | tail -3
-          echo "=== Finding DMG files (sorted by size, largest first) ==="
-          DMGS=$(find ipsw_extracted -name "*.dmg" -exec stat -f%z {} \; -print | paste - - | sort -rn | head -5 | awk '{print $2}')
-          echo "$DMGS"
-          echo "=== Searching for Tips.app in DMGs ==="
-          TIPS_APP_PATH=""
-          MOUNT_POINT="/tmp/ipsw_mount"
-          while IFS= read -r DMG_PATH; do
-              echo "Checking DMG: $DMG_PATH"
-              mkdir -p "$MOUNT_POINT"
-              hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-              hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
-              sleep 2
-              # Look for Tips.app (real system app, not in AppPlaceholders)
-              FOUND=$(find "$MOUNT_POINT" -maxdepth 5 -name "Tips.app" -type d -not -path "*/AppPlaceholders/*" 2>/dev/null | head -1)
-              if [ -n "$FOUND" ]; then
-                  TIPS_BINARY="$FOUND/Tips"
-                  if [ -f "$TIPS_BINARY" ] && file "$TIPS_BINARY" 2>/dev/null | grep -q "Mach-O"; then
-                      echo "Found: $FOUND"
-                      echo "Binary: $(file "$TIPS_BINARY" | grep -o 'Mach-O[^,]*')"
-                      TIPS_APP_PATH="$FOUND"
-                      mkdir -p ipa_payload/Payload
-                      cp -r "$TIPS_APP_PATH" ipa_payload/Payload/
-                      hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-                      break
-                  else
-                      echo "Tips.app found but no valid binary, skipping..."
-                  fi
-              fi
-              hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-          done <<< "$DMGS"
-          if [ -z "$TIPS_APP_PATH" ]; then
-              echo "ERROR: Tips.app not found in any DMG"
-              echo "Listing .app bundles (excluding AppPlaceholders):"
-              for DMG_PATH in $(find ipsw_extracted -name "*.dmg"); do
-                  mkdir -p "$MOUNT_POINT"
-                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-                  hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet 2>/dev/null || true
-                  sleep 2
-                  find "$MOUNT_POINT" -maxdepth 5 -name "*.app" -type d -not -path "*/AppPlaceholders/*" 2>/dev/null | head -20
-                  hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-              done
-              exit 1
-          fi
-          echo "=== Packaging Tips.app as InstallerVictim.ipa ==="
-          mkdir -p Victim
-          cd ipa_payload && zip -r ../Victim/InstallerVictim.ipa Payload/ && cd ..
+          brew install openssl
+          pip3 install ipatool
 
-      - name: Fix bundle ID for compatibility
+      - name: Download Victim IPA from App Store
+        env:
+          APPLE_ID: ${{ inputs.apple_id }}
+          APPLE_PASSWORD: ${{ inputs.apple_password }}
         run: |
-          mkdir -p _build/fix
-          for ipa in Victim/InstallerVictim.ipa; do
-            [ -f "$ipa" ] || continue
-            mkdir -p _build/fix
-            cd _build/fix
-            unzip -o "../../$ipa"
-            APP_DIR=$(find Payload -maxdepth 1 -mindepth 1 -type d | head -1)
-            PLIST="$APP_DIR/Info.plist"
-            echo "=== Fixing bundle ID in $(basename $APP_DIR) ==="
-            # 改 bundle ID 避免跟系统 App 冲突
-            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.opa334.TrollStoreHelper" "$PLIST"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName TrollStoreHelper" "$PLIST"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleName TrollStoreHelper" "$PLIST"
-            echo "New bundle ID: $(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST")"
-            rm -f "../../$ipa"
-            zip -r "../../$ipa" Payload/
-            cd ../..
-            rm -rf _build/fix
-          done
-          echo "=== Bundle ID fixed ==="
-          echo "Created InstallerVictim.ipa:"
-          ls -la Victim/InstallerVictim.ipa
-          rm -rf ipsw.zip ipsw_extracted ipa_payload
+          # 登录 App Store
+          ipatool auth login --email "$APPLE_ID" --password "$APPLE_PASSWORD"
 
-      - name: Verify Victim IPA
+          # 下载 Victim App IPA
+          ipatool download -b "${{ inputs.bundle_id }}" -o VictimIPA.ipa
+
+          echo "下载完成"
+          ls -lh VictimIPA.ipa
+
+      - name: Extract Team ID from IPA
         run: |
-          echo "=== Victim IPA Info ==="
-          python3 scripts/pwnify.py print Victim/InstallerVictim.ipa
+          # 解压 IPA
+          mkdir -p ipa_extract
+          unzip -q VictimIPA.ipa -d ipa_extract
+
+          # 从 Info.plist 或 embedded.provisionprofile 提取 Team ID
+          cd ipa_extract/Payload
+
+          # 尝试从 code signing 中提取 Team ID
+          APP_DIR=$(find . -maxdepth 1 -type d -mindepth 1 | head -1)
+          BINARY="$APP_DIR/$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist" 2>/dev/null || echo "$APP_DIR")"
+
+          # 使用 codesign 提取 Team ID
+          TEAM_ID=$(codesign -dvv "$BINARY" 2>&1 | grep "TeamIdentifier" | awk '{print $NF}')
+          echo "Team ID: $TEAM_ID"
+          echo "TEAM_ID=$TEAM_ID" >> $GITHUB_ENV
+
+          # 显示 IPA 信息
+          echo "=== Victim App Info ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP_DIR/Info.plist" 2>/dev/null || echo "No MinimumOSVersion in Info.plist"
+          echo "=================="
+
+      - name: Generate victim certificate
+        run: |
+          cd Victim
+          chmod +x make_cert.sh
+          ./make_cert.sh "$TEAM_ID"
+          echo "证书生成完成"
+          ls -lh victim.p12
+
+      - name: Setup TrollStore build environment
+        run: |
+          # 克隆 TrollStore 源码（指定版本）
+          git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
+
+          # 编译 Pwnify
+          cd TSBUILD/Pwnify
+          make
+
+          echo "构建环境准备完成"
+          ls -lh ../pwnify/pwnify
+
+      - name: Build TrollHelperOTA IPA
+        run: |
+          # 解压 Victim IPA 供注入
+          mkdir -p build_dir
+          unzip -q VictimIPA.ipa -d build_dir
+
+          APP_DIR=$(find build_dir/Payload -maxdepth 1 -type d -mindepth 1 | head -1)
+          APP_BINARY=$(basename "$APP_DIR")
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
+          BINARY_PATH="$APP_DIR/$BINARY_NAME"
+
+          echo "=== 构建 TrollHelperOTA ==="
+          echo "App: $APP_BINARY"
+          echo "Binary: $BINARY_NAME"
+          echo "Team ID: $TEAM_ID"
+
+          # 编译 PersistenceHelper
+          cd TSBUILD
+          make PersistenceHelper_Embedded_Legacy_arm64
+
+          # 注入 PersistenceHelper 到 Victim 二进制
+          ./pwnify/pwnify pwn "$BINARY_PATH" ./PersistenceHelper_Embedded_Legacy_arm64 arm64
+
+          # 签名注入后的二进制
+          ldid -s -K./Victim/victim.p12 "$BINARY_PATH"
+
+          cd ..
+
+          # 重新打包 IPA
+          cd build_dir
+          zip -r ../TrollHelperOTA_iphoneos-arm64.ipa Payload
+          cd ..
+
           echo ""
-          file Victim/InstallerVictim.ipa
+          echo "=== 构建完成 ==="
+          ls -lh TrollHelperOTA_iphoneos-arm64.ipa
 
-      - name: Generate victim.p12
-        run: bash scripts/generate_victim_cert.sh MRLQS75089
-
-      - name: Verify helper binaries
-        run: |
-          for f in helpers/PersistenceHelper_Embedded_Legacy_arm64 helpers/PersistenceHelper_Embedded_Legacy_arm64e; do
-            if [ ! -f "$f" ]; then
-              echo "ERROR: Missing $f"
-              exit 1
-            fi
-            python3 scripts/pwnify.py print "$f"
-            echo "---"
-          done
-
-      - name: Build TrollHelper_iOS15.ipa (arm64, A8-A11)
-        run: |
-          mkdir -p _build/tmp15
-          unzip -o Victim/InstallerVictim.ipa -d _build/tmp15
-          APP_PATH=$(find _build/tmp15/Payload -maxdepth 1 -mindepth 1 -type d | head -1)
-          APP_NAME=$(basename "$APP_PATH")
-          BINARY_NAME=$(echo "$APP_NAME" | cut -f1 -d'.')
-          echo "App: $APP_NAME, Binary: $BINARY_NAME"
-          cp helpers/PersistenceHelper_Embedded_Legacy_arm64 _build/TrollStorePersistenceHelperToInject
-          python3 scripts/pwnify.py set-cpusubtype _build/TrollStorePersistenceHelperToInject 1
-          ldid -S -K./victim.p12 _build/TrollStorePersistenceHelperToInject
-          python3 scripts/pwnify.py pwn "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" _build/TrollStorePersistenceHelperToInject
-          echo "=== Result ==="
-          python3 scripts/pwnify.py print "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME"
-          cd _build/tmp15 && zip -r ../../TrollHelper_iOS15.ipa Payload/ && cd ../..
-          rm -f _build/TrollStorePersistenceHelperToInject
-          rm -rf _build/tmp15
-          echo "Built TrollHelper_iOS15.ipa ($(du -h TrollHelper_iOS15.ipa | cut -f1))"
-
-      - name: Build TrollHelper_arm64e.ipa (A12+)
-        run: |
-          mkdir -p _build/tmp64e
-          unzip -o Victim/InstallerVictim.ipa -d _build/tmp64e
-          APP_PATH=$(find _build/tmp64e/Payload -maxdepth 1 -mindepth 1 -type d | head -1)
-          APP_NAME=$(basename "$APP_PATH")
-          BINARY_NAME=$(echo "$APP_NAME" | cut -f1 -d'.')
-          python3 scripts/pwnify.py pwn64e "_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" helpers/PersistenceHelper_Embedded_Legacy_arm64e
-          echo "=== Result ==="
-          python3 scripts/pwnify.py print "_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME"
-          cd _build/tmp64e && zip -r ../../TrollHelper_arm64e.ipa Payload/ && cd ../..
-          rm -rf _build/tmp64e
-          echo "Built TrollHelper_arm64e.ipa ($(du -h TrollHelper_arm64e.ipa | cut -f1))"
-
-      - name: Upload artifacts
+      - name: Upload TrollHelperOTA IPA
         uses: actions/upload-artifact@v4
         with:
-          name: TrollHelper-IPAs
-          path: |
-            TrollHelper_iOS15.ipa
-            TrollHelper_arm64e.ipa
-          retention-days: 30
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: trollhelper-ota-v1.0
-          files: |
-            TrollHelper_iOS15.ipa
-            TrollHelper_arm64e.ipa
-          body: |
-            ## TrollHelper OTA IPAs
-            | File | Device | iOS |
-            |------|--------|-----|
-            | TrollHelper_iOS15.ipa | A11及以下 (arm64) | 14.0-15.4.1 |
-            | TrollHelper_arm64e.ipa | A12+ (arm64e) | 14.0-15.6.1 |
-          draft: false
-          prerelease: true
-          overwrite_files: true
+          name: TrollHelperOTA-arm64
+          path: TrollHelperOTA_iphoneos-arm64.ipa
+          retention-days: 7
