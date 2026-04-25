@@ -43,12 +43,19 @@ jobs:
             exit 1
           fi
 
+      - name: Install dependencies
+        run: |
+          brew install openssl ldid
+
       - name: Generate victim certificate
         run: |
           # 使用 TrollStore 2.1.1 的 Victim/make_cert.sh
           git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
           cd TSBUILD/Victim
           chmod +x make_cert.sh
+          # macOS LibreSSL 不支持 copy_extensions，用 brew 的 openssl
+          OPENSSL=$(brew --prefix openssl)/bin/openssl
+          sed -i '' "s|openssl |$OPENSSL |g" make_cert.sh
           ./make_cert.sh "$TEAM_ID"
           echo "证书生成完成"
           ls -lh victim.p12
