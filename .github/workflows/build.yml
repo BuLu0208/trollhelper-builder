@@ -23,29 +23,47 @@ jobs:
           mkdir -p /tmp/ipa_check
           unzip -q Victim/InstallerVictim.ipa -d /tmp/ipa_check
           cd /tmp/ipa_check/Payload
-
           APP_DIR=$(find . -maxdepth 1 -type d -mindepth 1 | head -1)
           BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
-
-          echo "=== Victim App Info ==="
           echo "Bundle ID: $(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Info.plist")"
           echo "Version: $(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist")"
           echo "Binary: $BINARY_NAME"
-
           TEAM_ID=$(codesign -dvv "$APP_DIR/$BINARY_NAME" 2>&1 | grep "TeamIdentifier" | awk '{print $NF}')
           echo "Team ID: $TEAM_ID"
           echo "TEAM_ID=$TEAM_ID" >> $GITHUB_OUTPUT
 
       - name: Setup build environment
         run: |
-          brew install openssl ldid xz
+          brew install openssl ldid xz libarchive
 
-      - name: Install Theos
+      - name: Install Theos and iOS SDK
         run: |
           export THEOS=~/theos
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "PATH=$THEOS/bin:$PATH" >> $GITHUB_ENV
+
+          # 下载 Theos 官方 SDK 集合
+          mkdir -p "$THEOS/sdks"
+          curl -sL "https://github.com/theos/sdks/archive/master.zip" -o /tmp/sdks.zip
+          unzip -qo /tmp/sdks.zip -d /tmp
+          cp /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
+          echo "=== Available Theos SDKs ==="
+          ls "$THEOS/sdks/"
+
+          # 如果没有 iOS 16.5 SDK，用 Xcode 自带的 SDK 创建符号链接
+          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+            XCODE_SDK=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+            if [ -n "$XCODE_SDK" ] && [ -d "$XCODE_SDK" ]; then
+              SDK_VER=$(basename "$XCODE_SDK")
+              echo "Xcode SDK: $SDK_VER at $XCODE_SDK"
+              ln -sf "$XCODE_SDK" "$THEOS/sdks/iPhoneOS16.5.sdk"
+              echo "Created symlink: iPhoneOS16.5.sdk -> $XCODE_SDK"
+            else
+              echo "ERROR: No Xcode iOS SDK found"
+              exit 1
+            fi
+          fi
 
       - name: Clone TrollStore 2.1.1
         run: |
@@ -81,39 +99,26 @@ jobs:
       - name: Build TrollHelperOTA iOS15 (arm64)
         run: |
           cd TSBUILD
-
           echo "=== build_installer15 ==="
           mkdir -p ./_build/tmp15
 
-          # 作者原始流程：
-          # 1. unzip Victim IPA
+          # 作者 Makefile build_installer15 原始流程:
           unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp15
-
-          # 2. cp PersistenceHelper
           cp ./_build/PersistenceHelper_Embedded_Legacy_arm64 ./_build/TrollStorePersistenceHelperToInject
-
-          # 3. pwnify set-cpusubtype 1
           ./Pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
-
-          # 4. ldid 签名 PersistenceHelper
           ldid -s -K./Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
 
-          # 5. 找到 victim binary 并 pwnify pwn 注入
           APP_PATH=$(find ./_build/tmp15/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
           echo "Inject into: $APP_NAME/$BINARY_NAME"
-
           ./Pwnify/pwnify pwn "./_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" ./_build/TrollStorePersistenceHelperToInject
 
-          # 6. zip 打包
           pushd ./_build/tmp15
           zip -vrD ../../TrollHelper_iOS15.ipa *
           popd
-
           rm ./_build/TrollStorePersistenceHelperToInject
           rm -rf ./_build/tmp15
-
           echo "=== TrollHelper_iOS15.ipa 完成 ==="
           ls -lh TrollHelper_iOS15.ipa
 
@@ -130,29 +135,22 @@ jobs:
       - name: Build TrollHelperOTA arm64e
         run: |
           cd TSBUILD
-
           echo "=== build_installer64e ==="
           mkdir -p ./_build/tmp64e
 
-          # 作者原始流程：
-          # 1. unzip Victim IPA
+          # 作者 Makefile build_installer64e 原始流程:
           unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp64e
 
-          # 2. 找到 victim binary 并 pwnify pwn64e 注入 (不签名)
           APP_PATH=$(find ./_build/tmp64e/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
           echo "Inject into: $APP_NAME/$BINARY_NAME"
-
           ./Pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" ./_build/PersistenceHelper_Embedded_Legacy_arm64e
 
-          # 3. zip 打包
           pushd ./_build/tmp64e
           zip -vrD ../../TrollHelper_arm64e.ipa *
           popd
-
           rm -rf ./_build/tmp64e
-
           echo "=== TrollHelper_arm64e.ipa 完成 ==="
           ls -lh TrollHelper_arm64e.ipa
 
