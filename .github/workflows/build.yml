@@ -10,95 +10,163 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Victim IPA
+      - name: Download Victim IPA from Release
         run: |
-          mkdir -p VictimIPA
-          curl -sL -o VictimIPA/victim.ipa "https://github.com/BuLu0208/trollhelper-builder/releases/download/victim-ipa/com.7thg.flashlight_v3.29.ipa"
-          ls -lh VictimIPA/victim.ipa
+          mkdir -p Victim
+          curl -sL -o Victim/InstallerVictim.ipa \
+            "https://github.com/BuLu0208/trollhelper-builder/releases/download/victim-ipa/com.7thg.flashlight_v3.29.ipa"
+          ls -lh Victim/InstallerVictim.ipa
 
       - name: Extract Team ID from Victim IPA
+        id: teamid
         run: |
-          mkdir -p ipa_check
-          unzip -q VictimIPA/victim.ipa -d ipa_check
-          cd ipa_check/Payload
+          mkdir -p /tmp/ipa_check
+          unzip -q Victim/InstallerVictim.ipa -d /tmp/ipa_check
+          cd /tmp/ipa_check/Payload
 
           APP_DIR=$(find . -maxdepth 1 -type d -mindepth 1 | head -1)
           BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
-          BINARY_PATH="$APP_DIR/$BINARY_NAME"
 
           echo "=== Victim App Info ==="
           echo "Bundle ID: $(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Info.plist")"
           echo "Version: $(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist")"
-          echo "Min OS: $(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP_DIR/Info.plist" 2>/dev/null || echo 'N/A')"
           echo "Binary: $BINARY_NAME"
-          echo "========================"
 
           # 提取 Team ID
-          TEAM_ID=$(codesign -dvv "$BINARY_PATH" 2>&1 | grep "TeamIdentifier" | awk '{print $NF}')
+          TEAM_ID=$(codesign -dvv "$APP_DIR/$BINARY_NAME" 2>&1 | grep "TeamIdentifier" | awk '{print $NF}')
           echo "Team ID: $TEAM_ID"
-          echo "TEAM_ID=$TEAM_ID" >> $GITHUB_ENV
+          echo "TEAM_ID=$TEAM_ID" >> $GITHUB_OUTPUT
 
-          if [ -z "$TEAM_ID" ]; then
-            echo "ERROR: Could not extract Team ID"
-            exit 1
-          fi
-
-      - name: Install dependencies
+      - name: Setup build environment
         run: |
           brew install openssl ldid
 
-      - name: Generate victim certificate
+      - name: Install Theos
         run: |
-          # 使用 TrollStore 2.1.1 的 Victim/make_cert.sh
+          export THEOS=~/theos
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "PATH=$THEOS/bin:$PATH" >> $GITHUB_ENV
+          # Theos 依赖
+          brew install xz
+
+      - name: Clone TrollStore 2.1.1
+        run: |
           git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
+
+      - name: Generate victim certificate (make_cert.sh)
+        run: |
           cd TSBUILD/Victim
           chmod +x make_cert.sh
-          # macOS LibreSSL 不支持 copy_extensions，把 brew openssl 放到 PATH 最前面
+          # macOS LibreSSL 不支持 copy_extensions/addext，用 brew openssl
           export PATH="$(brew --prefix openssl)/bin:$PATH"
-          ./make_cert.sh "$TEAM_ID"
+          ./make_cert.sh "${{ steps.teamid.outputs.TEAM_ID }}"
           echo "证书生成完成"
           ls -lh victim.p12
 
-      - name: Build TrollHelperOTA IPA
+      - name: Build Pwnify
+        run: |
+          cd TSBUILD/Pwnify
+          make
+          echo "Pwnify 编译完成"
+          ls -lh pwnify/pwnify
+
+      - name: Build PersistenceHelper (iOS 15 arm64)
+        run: |
+          cd TSBUILD
+          # 按照 Makefile 中 make_trollhelper_embedded 的流程
+          # 编译 PersistenceHelper_Embedded_Legacy_arm64
+          cd TrollHelper
+          make clean
+          make FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 LEGACY_CT_BUG=1
+          cp .theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper ../_build/PersistenceHelper_Embedded_Legacy_arm64
+          echo "PersistenceHelper 编译完成"
+          ls -lh ../_build/PersistenceHelper_Embedded_Legacy_arm64
+
+      - name: Build TrollHelperOTA iOS15 (arm64) — 完全按照作者 Makefile 流程
         run: |
           cd TSBUILD
 
-          # 编译 Pwnify
-          cd Pwnify && make && cd ..
+          echo "=== 按照 build_installer15 流程 ==="
+          mkdir -p ./_build/tmp15
 
-          # 编译 PersistenceHelper (Legacy arm64, 兼容 iOS 14)
-          make PersistenceHelper_Embedded_Legacy_arm64
+          # Step 1: 解压 Victim IPA
+          unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp15
 
-          # 解压 Victim IPA
-          mkdir -p build_dir
-          unzip -q ../../VictimIPA/victim.ipa -d build_dir
+          # Step 2: 复制 PersistenceHelper
+          cp ./_build/PersistenceHelper_Embedded_Legacy_arm64 ./_build/TrollStorePersistenceHelperToInject
 
-          APP_DIR=$(find build_dir/Payload -maxdepth 1 -type d -mindepth 1 | head -1)
-          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
-          BINARY_PATH="$APP_DIR/$BINARY_NAME"
+          # Step 3: pwnify set-cpusubtype 1
+          echo "设置 cpusubtype..."
+          ./pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
 
-          echo "=== 注入 PersistenceHelper ==="
-          echo "Victim Binary: $BINARY_PATH"
-          echo "Team ID: $TEAM_ID"
+          # Step 4: ldid 签名 PersistenceHelper
+          echo "签名 PersistenceHelper..."
+          ldid -s -K./Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
 
-          # 注入
-          ./pwnify/pwnify pwn "$BINARY_PATH" ./PersistenceHelper_Embedded_Legacy_arm64 arm64
+          # Step 5: 找到 Victim App 的二进制路径并注入
+          APP_PATH=$(find ./_build/tmp15/Payload -name "*" -depth 1)
+          APP_NAME=$(basename "$APP_PATH")
+          BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
+          echo "Victim App: $APP_NAME, Binary: $BINARY_NAME"
 
-          # 签名
-          ldid -s -K./Victim/victim.p12 "$BINARY_PATH"
+          pwnify/pwnify pwn "./_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" ./_build/TrollStorePersistenceHelperToInject
 
-          # 重新打包
-          cd build_dir
-          zip -r ../TrollHelperOTA_iphoneos-arm64.ipa Payload
-          cd ..
+          # Step 6: 打包 IPA
+          pushd ./_build/tmp15
+          zip -vrD ../../TrollHelper_iOS15.ipa *
+          popd
+
+          # 清理
+          rm ./_build/TrollStorePersistenceHelperToInject
+          rm -rf ./_build/tmp15
 
           echo ""
-          echo "=== 构建完成 ==="
-          ls -lh TrollHelperOTA_iphoneos-arm64.ipa
+          echo "=== TrollHelper_iOS15.ipa 构建完成 ==="
+          ls -lh TrollHelper_iOS15.ipa
 
-      - name: Upload TrollHelperOTA IPA
+      - name: Build TrollHelperOTA arm64e — 完全按照作者 Makefile 流程
+        run: |
+          cd TSBUILD
+
+          echo "=== 按照 build_installer64e 流程 ==="
+
+          # Step 1: 编译 arm64e 版 PersistenceHelper
+          cd TrollHelper
+          make clean
+          make FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 CUSTOM_ARCHS=arm64e
+          cp .theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper ../_build/PersistenceHelper_Embedded_Legacy_arm64e
+          cd ..
+
+          mkdir -p ./_build/tmp64e
+
+          # Step 2: 解压 Victim IPA
+          unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp64e
+
+          # Step 3: 找到 Victim App 二进制并注入 (不签名)
+          APP_PATH=$(find ./_build/tmp64e/Payload -name "*" -depth 1)
+          APP_NAME=$(basename "$APP_PATH")
+          BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
+          echo "Victim App: $APP_NAME, Binary: $BINARY_NAME"
+
+          pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" ./_build/PersistenceHelper_Embedded_Legacy_arm64e
+
+          # Step 4: 打包 IPA
+          pushd ./_build/tmp64e
+          zip -vrD ../../TrollHelper_arm64e.ipa *
+          popd
+
+          rm -rf ./_build/tmp64e
+
+          echo ""
+          echo "=== TrollHelper_arm64e.ipa 构建完成 ==="
+          ls -lh TrollHelper_arm64e.ipa
+
+      - name: Upload IPAs
         uses: actions/upload-artifact@v4
         with:
-          name: TrollHelperOTA-arm64
-          path: TrollHelperOTA_iphoneos-arm64.ipa
+          name: TrollHelperOTA-IPAs
+          path: |
+            TrollHelper_iOS15.ipa
+            TrollHelper_arm64e.ipa
           retention-days: 7
