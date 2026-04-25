@@ -68,8 +68,8 @@ jobs:
           cp $GITHUB_WORKSPACE/helpers/PersistenceHelper_Embedded_Legacy_arm64 ./_build/TrollStorePersistenceHelperToInject
           # 3. pwnify set-cpusubtype 1
           ./TSBUILD/Pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
-          # 4. ldid 签名
-          ldid -s -K./TSBUILD/Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
+          # 4. ldid 签名（用 -S + entitlements.plist，和作者 Makefile LEGACY_CT_BUG 一致）
+          ldid -S./TSBUILD/TrollHelper/entitlements.plist -K./TSBUILD/Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
           # 5. 找到 victim binary 并注入
           APP_PATH=$(find ./_build/tmp15/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
