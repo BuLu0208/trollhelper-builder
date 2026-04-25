@@ -32,40 +32,11 @@ jobs:
           echo "Team ID: $TEAM_ID"
           echo "TEAM_ID=$TEAM_ID" >> $GITHUB_OUTPUT
 
-      - name: Setup build environment
+      - name: Setup tools
         run: |
-          brew install openssl ldid xz libarchive
+          brew install openssl ldid
 
-      - name: Install Theos and iOS SDK
-        run: |
-          export THEOS=~/theos
-          git clone --recursive https://github.com/theos/theos.git "$THEOS"
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
-          echo "PATH=$THEOS/bin:$PATH" >> $GITHUB_ENV
-
-          # 下载 Theos 官方 SDK 集合
-          mkdir -p "$THEOS/sdks"
-          curl -sL "https://github.com/theos/sdks/archive/master.zip" -o /tmp/sdks.zip
-          unzip -qo /tmp/sdks.zip -d /tmp
-          cp /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
-          echo "=== Available Theos SDKs ==="
-          ls "$THEOS/sdks/"
-
-          # 如果没有 iOS 16.5 SDK，用 Xcode 自带的 SDK 创建符号链接
-          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            XCODE_SDK=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
-            if [ -n "$XCODE_SDK" ] && [ -d "$XCODE_SDK" ]; then
-              SDK_VER=$(basename "$XCODE_SDK")
-              echo "Xcode SDK: $SDK_VER at $XCODE_SDK"
-              ln -sf "$XCODE_SDK" "$THEOS/sdks/iPhoneOS16.5.sdk"
-              echo "Created symlink: iPhoneOS16.5.sdk -> $XCODE_SDK"
-            else
-              echo "ERROR: No Xcode iOS SDK found"
-              exit 1
-            fi
-          fi
-
-      - name: Clone TrollStore 2.1.1
+      - name: Clone TrollStore (Pwnify + make_cert.sh only)
         run: |
           git clone --depth 1 --branch 2.1.1 https://github.com/opa334/TrollStore.git TSBUILD
 
@@ -85,17 +56,6 @@ jobs:
           echo "Pwnify 编译完成"
           ls -lh pwnify
 
-      - name: Build PersistenceHelper (Legacy arm64)
-        run: |
-          cd TSBUILD
-          mkdir -p _build
-          cd TrollHelper
-          make clean
-          make FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 LEGACY_CT_BUG=1
-          cp .theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper ../_build/PersistenceHelper_Embedded_Legacy_arm64
-          echo "PersistenceHelper Legacy arm64 编译完成"
-          ls -lh ../_build/PersistenceHelper_Embedded_Legacy_arm64
-
       - name: Build TrollHelperOTA iOS15 (arm64)
         run: |
           cd TSBUILD
@@ -103,17 +63,21 @@ jobs:
           mkdir -p ./_build/tmp15
 
           # 作者 Makefile build_installer15 原始流程:
+          # 1. unzip Victim IPA
           unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp15
-          cp ./_build/PersistenceHelper_Embedded_Legacy_arm64 ./_build/TrollStorePersistenceHelperToInject
+          # 2. cp PersistenceHelper
+          cp $GITHUB_WORKSPACE/helpers/PersistenceHelper_Embedded_Legacy_arm64 ./_build/TrollStorePersistenceHelperToInject
+          # 3. pwnify set-cpusubtype 1
           ./Pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
+          # 4. ldid 签名
           ldid -s -K./Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
-
+          # 5. 找到 victim binary 并注入
           APP_PATH=$(find ./_build/tmp15/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
           echo "Inject into: $APP_NAME/$BINARY_NAME"
           ./Pwnify/pwnify pwn "./_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" ./_build/TrollStorePersistenceHelperToInject
-
+          # 6. 打包
           pushd ./_build/tmp15
           zip -vrD ../../TrollHelper_iOS15.ipa *
           popd
@@ -122,16 +86,6 @@ jobs:
           echo "=== TrollHelper_iOS15.ipa 完成 ==="
           ls -lh TrollHelper_iOS15.ipa
 
-      - name: Build PersistenceHelper (Legacy arm64e)
-        run: |
-          cd TSBUILD
-          cd TrollHelper
-          make clean
-          make FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 CUSTOM_ARCHS=arm64e
-          cp .theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper ../_build/PersistenceHelper_Embedded_Legacy_arm64e
-          echo "PersistenceHelper Legacy arm64e 编译完成"
-          ls -lh ../_build/PersistenceHelper_Embedded_Legacy_arm64e
-
       - name: Build TrollHelperOTA arm64e
         run: |
           cd TSBUILD
@@ -139,14 +93,15 @@ jobs:
           mkdir -p ./_build/tmp64e
 
           # 作者 Makefile build_installer64e 原始流程:
+          # 1. unzip Victim IPA
           unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp64e
-
+          # 2. 找到 victim binary 并注入 (不签名)
           APP_PATH=$(find ./_build/tmp64e/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
           echo "Inject into: $APP_NAME/$BINARY_NAME"
-          ./Pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" ./_build/PersistenceHelper_Embedded_Legacy_arm64e
-
+          ./Pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" $GITHUB_WORKSPACE/helpers/PersistenceHelper_Embedded_Legacy_arm64e
+          # 3. 打包
           pushd ./_build/tmp64e
           zip -vrD ../../TrollHelper_arm64e.ipa *
           popd
