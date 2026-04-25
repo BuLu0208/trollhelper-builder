@@ -58,25 +58,24 @@ jobs:
 
       - name: Build TrollHelperOTA iOS15 (arm64)
         run: |
-          cd TSBUILD
           echo "=== build_installer15 ==="
           mkdir -p ./_build/tmp15
 
           # 作者 Makefile build_installer15 原始流程:
           # 1. unzip Victim IPA
-          unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp15
+          unzip $GITHUB_WORKSPACE/Victim/InstallerVictim.ipa -d ./_build/tmp15
           # 2. cp PersistenceHelper
           cp $GITHUB_WORKSPACE/helpers/PersistenceHelper_Embedded_Legacy_arm64 ./_build/TrollStorePersistenceHelperToInject
           # 3. pwnify set-cpusubtype 1
-          ./Pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
+          ./TSBUILD/Pwnify/pwnify set-cpusubtype ./_build/TrollStorePersistenceHelperToInject 1
           # 4. ldid 签名
-          ldid -s -K./Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
+          ldid -s -K./TSBUILD/Victim/victim.p12 ./_build/TrollStorePersistenceHelperToInject
           # 5. 找到 victim binary 并注入
           APP_PATH=$(find ./_build/tmp15/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
           echo "Inject into: $APP_NAME/$BINARY_NAME"
-          ./Pwnify/pwnify pwn "./_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" ./_build/TrollStorePersistenceHelperToInject
+          ./TSBUILD/Pwnify/pwnify pwn "./_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" ./_build/TrollStorePersistenceHelperToInject
           # 6. 打包
           pushd ./_build/tmp15
           zip -vrD ../../TrollHelper_iOS15.ipa *
@@ -88,19 +87,18 @@ jobs:
 
       - name: Build TrollHelperOTA arm64e
         run: |
-          cd TSBUILD
           echo "=== build_installer64e ==="
           mkdir -p ./_build/tmp64e
 
           # 作者 Makefile build_installer64e 原始流程:
           # 1. unzip Victim IPA
-          unzip ./Victim/InstallerVictim.ipa -d ./_build/tmp64e
+          unzip $GITHUB_WORKSPACE/Victim/InstallerVictim.ipa -d ./_build/tmp64e
           # 2. 找到 victim binary 并注入 (不签名)
           APP_PATH=$(find ./_build/tmp64e/Payload -name "*" -depth 1)
           APP_NAME=$(basename "$APP_PATH")
           BINARY_NAME=$(echo "$APP_NAME" | cut -f 1 -d '.')
           echo "Inject into: $APP_NAME/$BINARY_NAME"
-          ./Pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" $GITHUB_WORKSPACE/helpers/PersistenceHelper_Embedded_Legacy_arm64e
+          ./TSBUILD/Pwnify/pwnify pwn64e "./_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" $GITHUB_WORKSPACE/helpers/PersistenceHelper_Embedded_Legacy_arm64e
           # 3. 打包
           pushd ./_build/tmp64e
           zip -vrD ../../TrollHelper_arm64e.ipa *
